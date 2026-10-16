@@ -1,0 +1,577 @@
+name: Phase1A Android Baseline
+run-name: Phase1A Android ARM64 baseline (fixed commit a0eba91)
+
+# Manual-only. No inputs: the application source commit is fixed below and
+# cannot be changed at dispatch time. Build acceptance only; this workflow
+# does NOT provide Android runtime acceptance.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1a-android-baseline
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash   # GitHub expands this to: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  BASELINE_SHA: a0eba914f4c2a84ac1bc925adec2baabe920b9be
+  BASELINE_TREE: 63cc5627da0e8173d621e6065ee663bc8f472f32
+  BASELINE_LOCK_BLOB: c061e4fc0057646a0a5561dbc607114c00e44bfb
+  BASELINE_PUBSPEC_BLOB: 489d6acd5fcd2fc5979205db9b877c9e1bf1761b
+  FLUTTER_VERSION: '3.41.4'
+  FLUTTER_REVISION_PREFIX: ff37bef603
+  DART_VERSION: '3.11.1'
+  RUST_VERSION: '1.85.1'
+  NDK_VERSION: '28.0.13004108'
+  ANDROID_PLATFORM: 'android-36'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+  CMDLINE_TOOLS_ZIP: commandlinetools-linux-16111833_latest.zip
+  CMDLINE_TOOLS_SHA1: e025545c62a8e64c7559119566a569fb1dec5f60
+  EXPECTED_PACKAGE: com.github.wgh136.venera
+  EXPECTED_VERSION_NAME: '1.6.3'
+  EXPECTED_CERT_CN: Venera CI Disposable
+  # Disk model, in MiB, compared against runtime-measured free BYTES (never rounded GB, never the
+  # documented runner capacity). A filesystem needs: the work written to it + ONE headroom.
+  # If "/" and the work area share a filesystem the works add up but the headroom is counted once.
+  # Work values are estimates (measured in a cloud sandbox, not on a GitHub runner); see audit report.
+  DISK_HEADROOM_MIB: '2048'
+  DISK_ROOT_WORK_MIB: '6144'
+  DISK_BASE_WORK_MIB: '6144'
+  DISK_PREBUILD_ROOT_WORK_MIB: '2048'
+  DISK_PREBUILD_BASE_WORK_MIB: '4096'
+  CI: 'true'
+  FLUTTER_SUPPRESS_ANALYTICS: 'true'
+  GIT_TERMINAL_PROMPT: '0'
+
+jobs:
+  android-arm64-baseline:
+    name: Android ARM64 release baseline
+    if: github.repository == 'mengwen-liu/venera' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04   # ubuntu-22.04 images are in deprecation (see audit report)
+    timeout-minutes: 90
+    steps:
+      - name: Init evidence directories and helpers
+        run: |
+          P="$RUNNER_TEMP/phase1a"
+          LOGS="$P/logs"; EVID="$P/evidence"; APK_OUT="$P/apk_out"
+          mkdir -p "$LOGS" "$EVID" "$APK_OUT"
+          {
+            echo "PHASE=$P"
+            echo "LOGS=$P/logs"
+            echo "EVID=$P/evidence"
+            echo "APK_OUT=$P/apk_out"
+          } >> "$GITHUB_ENV"
+          cat > "$P/lib.sh" <<'LIB'
+          free_bytes() { # exact bytes available to this user; fails closed if unreadable
+            local b; b="$(df -B1 --output=avail -- "$1" 2>/dev/null | tail -1 | tr -dc '0-9')"
+            case "$b" in ''|*[!0-9]*) echo "::error::cannot read free space of $1" >&2; return 1 ;; esac
+            echo "$b"
+          }
+          same_fs() { [ "$(stat -c %d -- "$1")" = "$(stat -c %d -- "$2")" ]; }
+          need_mib() { # <same|separate> <root|base> <root_work_mib> <base_work_mib>; headroom is counted once
+            if [ "$1" = same ]; then echo $(( $3 + $4 + DISK_HEADROOM_MIB ))
+            elif [ "$2" = root ]; then echo $(( $3 + DISK_HEADROOM_MIB ))
+            else echo $(( $4 + DISK_HEADROOM_MIB )); fi
+          }
+          disk_snapshot() { # exact bytes; also records which filesystem each path is on
+            {
+              echo "== disk snapshot: $1 ($(date -u +%FT%TZ))"
+              df -B1 --output=source,fstype,size,used,avail,target -- / "${BASE:-/mnt}" 2>&1 || true
+              echo "st_dev(/)=$(stat -c %d -- / 2>&1 || true) st_dev(${BASE:-/mnt})=$(stat -c %d -- "${BASE:-/mnt}" 2>&1 || true)"
+            } >> "$EVID/disk.txt"
+          }
+          gate_disk() { # <path> <required_mib> <label>; exact byte comparison, free == required passes
+            local f need; f="$(free_bytes "$1")" || return 1
+            need=$(( $2 * 1048576 ))
+            echo "disk-gate[$3] path=$1 free_bytes=$f required_bytes=$need free_mib=$(( f / 1048576 )) required_mib=$2" | tee -a "$EVID/disk.txt"
+            if [ "$f" -lt "$need" ]; then echo "::error::insufficient disk space at $1 (free $f bytes < required $need bytes) [$3]"; return 1; fi
+          }
+          run_logged() { # <label> <logfile> <cmd...>; preserves the command's exit code
+            local label="$1" logfile="$2" rc; shift 2
+            set +e
+            "$@" 2>&1 | tee "$logfile"
+            rc=${PIPESTATUS[0]}
+            set -e
+            echo "${label}_exit=${rc}" >> "$EVID/exit_codes.txt"
+            return "$rc"
+          }
+          LIB
+          {
+            echo "workflow_source_commit=$GITHUB_SHA"
+            echo "workflow_ref=$GITHUB_REF"
+            echo "run_id=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_os=$RUNNER_OS arch=$RUNNER_ARCH image=${ImageOS:-unknown} ${ImageVersion:-}"
+            echo "documented_standard_runner_storage=14GB (informational only; gates use runtime-measured bytes)"
+          } > "$EVID/context.txt"
+          . "$P/lib.sh"; disk_snapshot "start"
+
+      - name: Checkout fixed application baseline
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: a0eba914f4c2a84ac1bc925adec2baabe920b9be
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+
+      - name: Verify baseline integrity
+        run: |
+          set -u
+          [ "$(git rev-parse HEAD)" = "$BASELINE_SHA" ] || { echo "::error::HEAD is not the frozen baseline"; exit 1; }
+          [ "$(git rev-parse 'HEAD^{tree}')" = "$BASELINE_TREE" ] || { echo "::error::tree mismatch"; exit 1; }
+          [ "$(git rev-parse HEAD:pubspec.lock)" = "$BASELINE_LOCK_BLOB" ] || { echo "::error::pubspec.lock blob mismatch"; exit 1; }
+          [ "$(git rev-parse HEAD:pubspec.yaml)" = "$BASELINE_PUBSPEC_BLOB" ] || { echo "::error::pubspec.yaml blob mismatch"; exit 1; }
+          grep -Eq "^[[:space:]]+flutter:[[:space:]]*${FLUTTER_VERSION}[[:space:]]*$" pubspec.yaml || { echo "::error::pubspec flutter pin is not ${FLUTTER_VERSION}"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::working tree not clean after checkout"; exit 1; }
+          {
+            echo "HEAD=$(git rev-parse HEAD)"
+            echo "TREE=$(git rev-parse 'HEAD^{tree}')"
+            sha256sum pubspec.lock pubspec.yaml
+          } | tee "$EVID/baseline.txt"
+
+      - name: Conditional disk cleanup (verified disposable runner assets only) and gate
+        run: |
+          . "$PHASE/lib.sh"
+          ROOT_PATH=/
+          disk_snapshot "before-cleanup"
+          BASE=/mnt/venera-ci
+          if sudo mkdir -p "$BASE" && sudo chown "$(id -u):$(id -g)" "$BASE"; then :; else BASE="$HOME/venera-ci"; mkdir -p "$BASE"; fi
+          if same_fs "$ROOT_PATH" "$BASE"; then layout=same; else layout=separate; fi
+          need_root="$(need_mib "$layout" root "$DISK_ROOT_WORK_MIB" "$DISK_BASE_WORK_MIB")"
+          need_base="$(need_mib "$layout" base "$DISK_ROOT_WORK_MIB" "$DISK_BASE_WORK_MIB")"
+          echo "layout=$layout base=$BASE required_mib(root)=$need_root required_mib(base)=$need_base free_bytes(root)=$(free_bytes "$ROOT_PATH")" | tee -a "$EVID/disk.txt"
+          # Delete only as much as needed, one target at a time. Every path below was checked against the
+          # actions/runner-images install scripts (install-dotnetcore-sdk.sh, install-haskell.sh,
+          # install-swift.sh, install-codeql-bundle.sh). None is needed for a Flutter/Android build.
+          # Deleting from "/" cannot help a separate work filesystem, so the loop only targets "/".
+          for d in /usr/share/dotnet /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL; do
+            if [ "$(free_bytes "$ROOT_PATH")" -ge $(( need_root * 1048576 )) ]; then break; fi
+            if [ -d "$d" ] && [ ! -L "$d" ]; then
+              before="$(free_bytes "$ROOT_PATH")"
+              sudo rm -rf -- "$d"
+              after="$(free_bytes "$ROOT_PATH")"
+              echo "removed $d freed_bytes=$(( after - before ))" | tee -a "$EVID/disk.txt"
+              disk_snapshot "after-removing-$(basename "$d")"
+            fi
+          done
+          {
+            echo "BASE=$BASE"
+            echo "DISK_LAYOUT=$layout"
+            echo "ANDROID_HOME=$BASE/android-sdk"
+            echo "ANDROID_SDK_ROOT=$BASE/android-sdk"
+            echo "ANDROID_NDK_HOME=$BASE/android-sdk/ndk/$NDK_VERSION"
+            echo "ANDROID_NDK_ROOT=$BASE/android-sdk/ndk/$NDK_VERSION"
+            echo "ANDROID_NDK=$BASE/android-sdk/ndk/$NDK_VERSION"
+            echo "ANDROID_NDK_LATEST_HOME=$BASE/android-sdk/ndk/$NDK_VERSION"
+            echo "GRADLE_USER_HOME=$BASE/gradle-home"
+            echo "PUB_CACHE=$BASE/pub-cache"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$BASE/android-sdk" "$BASE/gradle-home" "$BASE/pub-cache"
+          disk_snapshot "after-cleanup"
+          gate_disk "$ROOT_PATH" "$need_root" after-cleanup-root
+          gate_disk "$BASE" "$need_base" after-cleanup-base
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.41.4
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.41.4'
+          architecture: x64
+          cache: false
+
+      - name: Set up Rust 1.85.1 from rust-toolchain.toml
+        run: |
+          command -v rustup >/dev/null || { echo "::error::rustup not found on runner"; exit 1; }
+          rustup show 2>&1 | tee "$LOGS/03a_rustup_show.log"
+          rv="$(rustc --version)"; echo "$rv" | tee -a "$EVID/versions.txt"
+          case "$rv" in "rustc ${RUST_VERSION} "*) ;; *) echo "::error::rustc is not ${RUST_VERSION}"; exit 1 ;; esac
+          targets="$(rustup target list --installed)"
+          grep -qx 'aarch64-linux-android' <<< "$targets" || { echo "::error::aarch64-linux-android target missing"; exit 1; }
+
+      - name: Install isolated Android SDK (cmdline-tools, platform, build-tools, NDK)
+        run: |
+          SDK="$ANDROID_HOME"
+          mkdir -p "$SDK/cmdline-tools"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/cmdline-tools.zip" "https://dl.google.com/android/repository/${CMDLINE_TOOLS_ZIP}"
+          echo "${CMDLINE_TOOLS_SHA1}  $RUNNER_TEMP/cmdline-tools.zip" | sha1sum -c -
+          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$SDK/cmdline-tools"
+          mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          rm -f "$RUNNER_TEMP/cmdline-tools.zip"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          # Accepts the Google Android SDK licenses inside this ephemeral runner only.
+          "$SM" --sdk_root="$SDK" --licenses < <(yes) > "$LOGS/03b_sdk_licenses.log" 2>&1
+          "$SM" --sdk_root="$SDK" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${NDK_VERSION}" 2>&1 | tee "$LOGS/03c_sdk_install.log"
+          grep -q "^Pkg.Revision = ${NDK_VERSION}$" "$SDK/ndk/${NDK_VERSION}/source.properties" || { echo "::error::NDK ${NDK_VERSION} not installed"; exit 1; }
+          . "$PHASE/lib.sh"; disk_snapshot "after-sdk-install"
+
+      - name: Create disposable signing key (runner-local, never uploaded)
+        run: |
+          set +x
+          umask 077
+          D="$RUNNER_TEMP/signing"; mkdir -p "$D"; chmod 700 "$D"
+          KS_PW="$(openssl rand -hex 24)"
+          echo "::add-mask::$KS_PW"
+          export KS_PW
+          # Passwords are passed through the environment, never on a command line.
+          keytool -genkeypair -keystore "$D/disposable-ci.jks" -alias venera_disposable_ci \
+            -keyalg RSA -keysize 2048 -validity 7 -storepass:env KS_PW -keypass:env KS_PW \
+            -dname "CN=${EXPECTED_CERT_CN}, O=CI Test Only" > /dev/null 2>&1
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=venera_disposable_ci\nstoreFile=%s\n' \
+            "$KS_PW" "$KS_PW" "$D/disposable-ci.jks" > android/key.properties
+          chmod 600 android/key.properties "$D/disposable-ci.jks"
+          mkdir -p "$PHASE/markers"; : > "$PHASE/markers/signing_created"
+          # Expected certificate fingerprint (public value) taken from the keystore just generated.
+          listing="$(keytool -list -v -keystore "$D/disposable-ci.jks" -alias venera_disposable_ci -storepass:env KS_PW 2>/dev/null)"
+          unset KS_PW
+          fp="$(printf '%s\n' "$listing" | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' | tr -d ':' | tr 'A-F' 'a-f')"
+          [ "$(printf '%s\n' "$fp" | wc -l)" -eq 1 ] && printf '%s' "$fp" | grep -Eq '^[0-9a-f]{64}$' || { echo "::error::could not read keystore certificate SHA-256"; exit 1; }
+          printf '%s\n' "$fp" > "$EVID/expected_cert_sha256.txt"
+          echo "expected signing certificate SHA-256: $fp"
+          git check-ignore -q android/key.properties || { echo "::error::android/key.properties is not gitignored"; exit 1; }
+
+      - name: Record and assert toolchain versions
+        run: |
+          . "$PHASE/lib.sh"
+          {
+            echo "== flutter"; flutter --version
+            echo "== java"; java -version 2>&1
+            echo "== sdk"; ls "$ANDROID_HOME/ndk" "$ANDROID_HOME/build-tools" "$ANDROID_HOME/platforms"
+            echo "== gradle wrapper"; grep distributionUrl android/gradle/wrapper/gradle-wrapper.properties
+          } 2>&1 | tee -a "$EVID/versions.txt" > "$LOGS/02a_versions.log"
+          grep -q "Flutter ${FLUTTER_VERSION}" "$LOGS/02a_versions.log" || { echo "::error::Flutter version mismatch"; exit 1; }
+          grep -q "${FLUTTER_REVISION_PREFIX}" "$LOGS/02a_versions.log" || { echo "::error::Flutter revision mismatch"; exit 1; }
+          grep -q "Dart ${DART_VERSION}" "$LOGS/02a_versions.log" || { echo "::error::Dart version mismatch"; exit 1; }
+          grep -Eq 'version "17\.' "$LOGS/02a_versions.log" || { echo "::error::JDK is not 17"; exit 1; }
+          grep -q 'gradle-8.13-all.zip' "$LOGS/02a_versions.log" || { echo "::error::Gradle wrapper is not 8.13"; exit 1; }
+          set +e; flutter doctor -v > "$LOGS/02b_doctor.log" 2>&1; echo "flutter_doctor_exit=$?" >> "$EVID/exit_codes.txt"; set -e
+          # Disk gates for the remaining (build-phase) work
+          ROOT_PATH=/
+          need_root="$(need_mib "$DISK_LAYOUT" root "$DISK_PREBUILD_ROOT_WORK_MIB" "$DISK_PREBUILD_BASE_WORK_MIB")"
+          need_base="$(need_mib "$DISK_LAYOUT" base "$DISK_PREBUILD_ROOT_WORK_MIB" "$DISK_PREBUILD_BASE_WORK_MIB")"
+          gate_disk "$ROOT_PATH" "$need_root" prebuild-root
+          gate_disk "$BASE" "$need_base" prebuild-base
+
+      - name: flutter pub get --enforce-lockfile
+        run: |
+          . "$PHASE/lib.sh"
+          run_logged flutter_pub_get "$LOGS/03_pub_get.log" flutter pub get --enforce-lockfile
+          disk_snapshot "after-pub-get"
+
+      - name: flutter analyze (exit-code baseline plus fail-closed gate)
+        id: analyze
+        env:
+          EXPECTED_ANALYZE_INFO_COUNT: '8'
+          EXPECTED_ANALYZE_INFOS: |
+            info deprecated_member_use lib/components/image.dart:115:20
+            info deprecated_member_use lib/pages/reader/comic_image.dart:116:20
+            info deprecated_member_use lib/utils/io.dart:410:9
+            info deprecated_member_use lib/utils/io.dart:410:15
+            info deprecated_member_use lib/utils/io.dart:418:9
+            info deprecated_member_use lib/utils/io.dart:418:15
+            info deprecated_member_use lib/utils/io.dart:423:7
+            info deprecated_member_use lib/utils/io.dart:423:13
+        run: |
+          . "$PHASE/lib.sh"
+          # --no-pub: dependencies were already resolved with --enforce-lockfile; analyze must not re-resolve.
+          # Run A (default flags): infos are fatal by default, so the original exit code is preserved (expected 1).
+          rcA=0
+          run_logged flutter_analyze_default "$LOGS/04a_analyze_default.log" flutter analyze --no-pub || rcA=$?
+          # Run B (gate): --no-fatal-infos; warnings and errors stay fatal (expected 0).
+          rcB=0
+          run_logged flutter_analyze_gate_no_fatal_infos "$LOGS/04b_analyze_gate.log" flutter analyze --no-pub --no-fatal-infos || rcB=$?
+          python3 - "$LOGS/04a_analyze_default.log" "$rcA" "$LOGS/04b_analyze_gate.log" "$rcB" <<'PY' | tee "$EVID/analyze_summary.txt"
+          import os, re, sys
+          logA, rcA, logB, rcB = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+          exp_count = int(os.environ["EXPECTED_ANALYZE_INFO_COUNT"])
+          expected = sorted(l.strip() for l in os.environ["EXPECTED_ANALYZE_INFOS"].splitlines() if l.strip())
+          HEAD = re.compile(r"^Analyzing .+\.\.\.$")
+          SUMM = re.compile(r"^(?:(\d+) issues? found\.|No issues found!)(?: \(ran in [0-9.]+s\))?$")
+          FIND = re.compile(r"^\s*(info|warning|error) \u2022 (.+) \u2022 (\S+:\d+:\d+) \u2022 (\S+)$")
+
+          def parse(path):
+              r = {"find": [], "head": 0, "summ": [], "other": []}
+              with open(path, encoding="utf-8", errors="replace") as f:
+                  for raw in f:
+                      line = raw.rstrip("\r\n").rstrip()
+                      if not line.strip():
+                          continue
+                      m = FIND.match(line)
+                      if m:
+                          r["find"].append((m.group(1), m.group(4), m.group(3)))
+                          continue
+                      if HEAD.match(line):
+                          r["head"] += 1
+                          continue
+                      m = SUMM.match(line)
+                      if m:
+                          r["summ"].append(int(m.group(1) or 0))
+                          continue
+                      r["other"].append(line[:200])
+              return r
+
+          def check(tag, r, rc, want_rc):
+              p = []
+              if r["other"]:
+                  p.append(f"{tag}: {len(r['other'])} unclassifiable output line(s); first: {r['other'][0]!r}")
+              if r["head"] != 1:
+                  p.append(f"{tag}: expected exactly one 'Analyzing' line, found {r['head']}")
+              if len(r["summ"]) != 1:
+                  p.append(f"{tag}: expected exactly one summary line, found {len(r['summ'])}")
+              elif r["summ"][0] != len(r["find"]):
+                  p.append(f"{tag}: summary says {r['summ'][0]} issues but {len(r['find'])} were parsed")
+              kinds = [k for k, _, _ in r["find"]]
+              errs, warns, infos = kinds.count("error"), kinds.count("warning"), kinds.count("info")
+              if errs:
+                  p.append(f"{tag}: {errs} analyzer error(s)")
+              if warns:
+                  p.append(f"{tag}: {warns} analyzer warning(s)")
+              if infos != exp_count:
+                  p.append(f"{tag}: {infos} info finding(s), baseline is {exp_count}")
+              sigs = sorted(f"{k} {rule} {loc}" for k, rule, loc in r["find"])
+              if sigs != expected:
+                  extra = sorted(set(sigs) - set(expected))
+                  missing = sorted(set(expected) - set(sigs))
+                  p.append(f"{tag}: finding set differs from baseline; extra={extra[:5]} missing={missing[:5]}")
+              if rc != want_rc:
+                  p.append(f"{tag}: exit code {rc}, expected {want_rc}")
+              return p, (errs, warns, infos), sigs
+
+          A, B = parse(logA), parse(logB)
+          pa, ca, sa = check("run-A(default)", A, rcA, 1)
+          pb, cb, sb = check("run-B(--no-fatal-infos)", B, rcB, 0)
+          problems = pa + pb
+          if sa != sb:
+              problems.append("run A and run B report different findings")
+          print(f"flutter_analyze_default_exit_preserved={rcA}")
+          print(f"flutter_analyze_gate_exit={rcB}")
+          print(f"run-A errors/warnings/infos={ca} run-B errors/warnings/infos={cb}")
+          result = "info_only_baseline_match" if not problems else "failed"
+          print(f"classification={result}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"exit_code_default={rcA}\n")
+              out.write(f"exit_code_gate={rcB}\n")
+              out.write(f"classification={result}\n")
+          if problems:
+              for q in problems:
+                  print(f"::error::{q}")
+              sys.exit(1)
+          print("::notice::analyzer output matches the frozen baseline (8 info findings); recorded, not fixed")
+          PY
+
+      - name: flutter test
+        run: |
+          . "$PHASE/lib.sh"
+          run_logged flutter_test "$LOGS/05_test.log" flutter test
+
+      - name: Build Android ARM64 release APK
+        run: |
+          . "$PHASE/lib.sh"
+          disk_snapshot "before-build"
+          run_logged flutter_build_apk_arm64 "$LOGS/06_build_apk.log" \
+            flutter build apk --release --target-platform android-arm64 --split-per-abi -v
+          disk_snapshot "after-build"
+
+      - name: Inspect and verify APK
+        id: verify
+        run: |
+          . "$PHASE/lib.sh"
+          BT="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
+          find build/app/outputs -type f -name '*.apk' | sort | tee "$EVID/apk_candidates.txt"
+          mapfile -t arm < <(grep -E 'arm64-v8a' "$EVID/apk_candidates.txt" || true)
+          [ "${#arm[@]}" -ge 1 ] || { echo "::error::no arm64-v8a APK found"; exit 1; }
+          # Gradle and Flutter may each write a copy; all arm64 copies must be byte-identical.
+          sha256sum "${arm[@]}" | tee "$EVID/apk_candidate_hashes.txt"
+          [ "$(awk '{print $1}' "$EVID/apk_candidate_hashes.txt" | sort -u | wc -l)" -eq 1 ] || { echo "::error::arm64 APK copies differ"; exit 1; }
+          APK="${arm[0]}"
+          "$BT/aapt2" dump badging "$APK" > "$EVID/aapt2_badging.txt"
+          pkg="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" "$EVID/aapt2_badging.txt")"
+          vname="$(sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p" "$EVID/aapt2_badging.txt")"
+          vcode="$(sed -n "s/^package:.* versionCode='\([^']*\)'.*/\1/p" "$EVID/aapt2_badging.txt")"
+          native="$(grep -E '^native-code:' "$EVID/aapt2_badging.txt" | tr -d "'" || true)"
+          [ "$pkg" = "$EXPECTED_PACKAGE" ] || { echo "::error::package mismatch: $pkg"; exit 1; }
+          [ "$vname" = "$EXPECTED_VERSION_NAME" ] || { echo "::error::versionName mismatch: $vname"; exit 1; }
+          [ "$native" = "native-code: arm64-v8a" ] || { echo "::error::native-code is not exclusively arm64-v8a: $native"; exit 1; }
+          libs="$(unzip -Z1 "$APK" | grep '^lib/' | cut -d/ -f2 | sort -u | tr '\n' ' ')"
+          [ "$libs" = "arm64-v8a " ] || { echo "::error::lib/ ABI dirs: $libs"; exit 1; }
+          "$BT/apksigner" verify --print-certs -v "$APK" > "$EVID/apksigner.txt" 2>&1
+          grep -q '^Verifies' "$EVID/apksigner.txt" || { echo "::error::apksigner did not verify"; exit 1; }
+          grep -q "Number of signers: 1" "$EVID/apksigner.txt" || { echo "::error::unexpected signer count"; exit 1; }
+          grep -q "CN=${EXPECTED_CERT_CN}" "$EVID/apksigner.txt" || { echo "::error::certificate is not the disposable CI key"; exit 1; }
+          # The APK signing certificate must be exactly the certificate of the keystore generated in this job.
+          actual_fp="$(sed -n 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*//p' "$EVID/apksigner.txt" | tr 'A-F' 'a-f')"
+          [ "$(printf '%s\n' "$actual_fp" | wc -l)" -eq 1 ] && printf '%s' "$actual_fp" | grep -Eq '^[0-9a-f]{64}$' || { echo "::error::cannot read APK signer certificate SHA-256"; exit 1; }
+          expected_fp="$(cat "$EVID/expected_cert_sha256.txt")"
+          [ "$actual_fp" = "$expected_fp" ] || { echo "::error::APK signing certificate does not match the job keystore certificate"; exit 1; }
+          echo "signing certificate SHA-256 matches keystore: $actual_fp" | tee "$EVID/cert_fingerprint_match.txt"
+          NAME="$(basename "$APK")"
+          cp "$APK" "$APK_OUT/$NAME"
+          (cd "$APK_OUT" && sha256sum "$NAME" | tee "$NAME.sha256")
+          {
+            echo "file=$NAME size_bytes=$(stat -c %s "$APK")"
+            echo "package=$pkg versionName=$vname versionCode=$vcode"
+            echo "native-code=arm64-v8a lib_abis=$libs"
+            echo "signature=verified (apksigner) cert=CN=${EXPECTED_CERT_CN} sha256=${actual_fp} (matches job keystore)"
+            echo "NOTE: build acceptance only; Android runtime acceptance NOT performed"
+          } | tee "$APK_OUT/verification.txt"
+          cp "$APK_OUT/verification.txt" "$EVID/verification.txt"
+
+      - name: Verify Git integrity after build
+        id: gitcheck
+        if: always()
+        run: |
+          . "$PHASE/lib.sh"
+          ok=1
+          [ "$(git rev-parse HEAD)" = "$BASELINE_SHA" ] || ok=0
+          git diff --quiet HEAD || ok=0
+          [ -z "$(git status --porcelain)" ] || ok=0
+          [ "$(git rev-parse HEAD:pubspec.lock)" = "$BASELINE_LOCK_BLOB" ] || ok=0
+          git diff --quiet HEAD -- pubspec.lock pubspec.yaml || ok=0
+          {
+            echo "post_build_head=$(git rev-parse HEAD)"
+            echo "post_build_status_lines=$(git status --porcelain | wc -l)"
+            echo "git_integrity_ok=$ok"
+          } | tee "$EVID/git_integrity.txt"
+          [ "$ok" -eq 1 ] || { echo "::error::git integrity check failed"; exit 1; }
+
+      - name: Sanitize diagnostic logs (fail closed)
+        id: sanitize
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, shutil, sys
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "phase1a"
+          dst = root / "sanitized"
+          ALLOWED_SUFFIX = {".log", ".txt"}
+          MAX_FILE_BYTES = 20 * 1024 * 1024
+          MAX_TOTAL_BYTES = 100 * 1024 * 1024
+
+          def fail(msg):
+              shutil.rmtree(dst, ignore_errors=True)
+              print(f"::error::{msg}; sanitized logs discarded (fail closed)")
+              sys.exit(1)
+
+          shutil.rmtree(dst, ignore_errors=True)
+          dst.mkdir()
+
+          # 1. Literal secrets: values from the generated key.properties.
+          secrets = set()
+          kp = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "android" / "key.properties"
+          if kp.exists():
+              for line in kp.read_text(errors="replace").splitlines():
+                  k, _, v = line.partition("=")
+                  if k.strip() in ("storePassword", "keyPassword") and len(v.strip()) >= 8:
+                      secrets.add(v.strip())
+          if (root / "markers" / "signing_created").exists() and not secrets:
+              fail("signing key was created but its secret values could not be loaded for screening")
+
+          # 2. Redaction (best effort) ...
+          VAL = r"""("[^"\n]*"|'[^'\n]*'|\S+)"""
+          redactions = [
+              (re.compile(r"(?i)\b(authorization)\b(\s*[=:]\s*)(?:(?:bearer|basic|token)\s+)?" + VAL), r"\1\2***"),
+              (re.compile(r"(?i)\bbearer\s+\S+"), "Bearer ***"),
+              (re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|private[_-]?key|access[_-]?token|token)\b(\s*[=:]\s*)" + VAL), r"\1\2***"),
+              (re.compile(r"\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{20,}\b"), "***"),
+              (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "***"),
+              (re.compile(r"://[^/\s:@]+:[^/\s@]+@"), "://***@"),
+          ]
+          # 3. ... followed by independent detectors that must find nothing in the redacted output.
+          detectors = {
+              "PEM private key": re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY"),
+              "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+              "GitHub token": re.compile(r"\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"),
+              "cloud/API token": re.compile(r"\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{30,}|\bxox[baprs]-[A-Za-z0-9-]{10,}|\bglpat-[A-Za-z0-9_-]{15,}"),
+              "URL credentials": re.compile(r"://[^/\s:@*]+:[^/\s@*]+@"),
+              "long base64-like blob": re.compile(r"[A-Za-z0-9+/_-]{200,}={0,2}"),
+              "unredacted secret assignment": re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key|private[_-]?key|access[_-]?token)\b\s*[=:]\s*(?!\*\*\*)\S"),
+          }
+          blocked_names = re.compile(r"(?i)(\.jks$|\.keystore$|\.p12$|\.pfx$|\.pem$|\.key$|key\.properties$)")
+
+          count, total = 0, 0
+          for sub in ("logs", "evidence"):
+              d = root / sub
+              if not d.is_dir():
+                  continue
+              for f in sorted(d.rglob("*")):
+                  if not f.is_file():
+                      continue
+                  if blocked_names.search(f.name) or f.suffix not in ALLOWED_SUFFIX:
+                      fail(f"unexpected file in evidence area: {f.name}")
+                  data = f.read_bytes()
+                  if b"\x00" in data:
+                      fail(f"binary content in {f.name}")
+                  if len(data) > MAX_FILE_BYTES:
+                      fail(f"{f.name} exceeds size limit")
+                  total += len(data)
+                  if total > MAX_TOTAL_BYTES:
+                      fail("total log size exceeds limit")
+                  text = data.decode("utf-8", errors="replace")
+                  for s in secrets:
+                      text = text.replace(s, "***")
+                  for rx, rep in redactions:
+                      text = rx.sub(rep, text)
+                  # screening
+                  condensed = re.sub(r"\s+", "", text)
+                  for s in secrets:
+                      for needle in {s, s[:16], s[-16:]}:
+                          if needle in text or needle in condensed:
+                              fail(f"secret value (or fragment) still present in {f.name}")
+                  for name, rx in detectors.items():
+                      if rx.search(text):
+                          fail(f"detector '{name}' matched in {f.name}")
+                  out = dst / sub / f.relative_to(d)
+                  out.parent.mkdir(parents=True, exist_ok=True)
+                  out.write_text(text)
+                  count += 1
+          if count == 0:
+              fail("no evidence files found to sanitize")
+          print(f"sanitized {count} files; literal secrets screened={len(secrets)}")
+          PY
+
+      - name: Job summary
+        if: always()
+        run: |
+          S="$PHASE/sanitized/evidence"
+          {
+            echo "## Phase1A Android baseline (fixed commit ${BASELINE_SHA:0:7})"
+            echo "**BUILD ACCEPTANCE ONLY. Android runtime acceptance was NOT performed.**"
+            echo
+            echo '```'
+            if [ -d "$S" ]; then
+              for f in exit_codes.txt analyze_summary.txt verification.txt git_integrity.txt disk.txt; do
+                if [ -f "$S/$f" ]; then cat "$S/$f"; fi
+              done
+            else
+              echo "sanitized evidence unavailable (log screening failed closed or did not run)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized diagnostic logs
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: phase1a-diagnostic-logs
+          path: ${{ runner.temp }}/phase1a/sanitized
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: false
+
+      - name: Upload verified APK and SHA-256 evidence
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' && steps.gitcheck.outcome == 'success' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: phase1a-verified-apk
+          path: ${{ runner.temp }}/phase1a/apk_out
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: false
