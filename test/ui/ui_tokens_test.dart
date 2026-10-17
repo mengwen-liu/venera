@@ -5,14 +5,7 @@ import 'package:venera/foundation/ui_tokens.dart';
 void main() {
   test('spacing scale', () {
     expect(
-      [
-        UiSpace.s1,
-        UiSpace.s2,
-        UiSpace.s3,
-        UiSpace.s4,
-        UiSpace.s6,
-        UiSpace.s8,
-      ],
+      [UiSpace.s1, UiSpace.s2, UiSpace.s3, UiSpace.s4, UiSpace.s6, UiSpace.s8],
       [4, 8, 12, 16, 24, 32],
     );
   });

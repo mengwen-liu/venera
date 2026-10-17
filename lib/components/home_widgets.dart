@@ -176,8 +176,9 @@ class HomeSectionHeading extends StatelessWidget {
                       header: true,
                       child: Text(
                         title,
-                        style: theme.textTheme.uiSectionTitle
-                            ?.copyWith(color: scheme.uiTextPrimary),
+                        style: theme.textTheme.uiSectionTitle?.copyWith(
+                          color: scheme.uiTextPrimary,
+                        ),
                       ),
                     ),
                     if (count != null)
@@ -192,8 +193,9 @@ class HomeSectionHeading extends StatelessWidget {
                         ),
                         child: Text(
                           count.toString(),
-                          style: theme.textTheme.uiCaption
-                              ?.copyWith(color: scheme.uiOnBadge),
+                          style: theme.textTheme.uiCaption?.copyWith(
+                            color: scheme.uiOnBadge,
+                          ),
                         ),
                       ),
                   ],
@@ -284,8 +286,9 @@ class RecentComicCard extends StatelessWidget {
                   data.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: textTheme.uiItemTitle
-                      ?.copyWith(color: scheme.uiTextPrimary),
+                  style: textTheme.uiItemTitle?.copyWith(
+                    color: scheme.uiTextPrimary,
+                  ),
                 ),
                 if (detailLine != null && detailLine.isNotEmpty) ...[
                   const SizedBox(height: UiSpace.s1),
@@ -412,8 +415,9 @@ class HomeEmptyState extends StatelessWidget {
           Text(
             message,
             textAlign: TextAlign.center,
-            style:
-                theme.textTheme.uiBody?.copyWith(color: scheme.uiTextPrimary),
+            style: theme.textTheme.uiBody?.copyWith(
+              color: scheme.uiTextPrimary,
+            ),
           ),
           if (actionLabel != null && onAction != null) ...[
             const SizedBox(height: UiSpace.s4),

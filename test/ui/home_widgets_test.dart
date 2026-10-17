@@ -55,9 +55,9 @@ Widget harness(
     ),
     builder: (context, app) {
       return MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: TextScaler.linear(textScale),
-        ),
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(textScale)),
         child: app!,
       );
     },
@@ -135,9 +135,7 @@ void main() {
 
   group('RecentComicCard', () {
     testWidgets('renders supplied data', (tester) async {
-      await tester.pumpWidget(
-        harness(const RecentComicCard(data: _fakeData)),
-      );
+      await tester.pumpWidget(harness(const RecentComicCard(data: _fakeData)));
       expect(find.text('Demo Comic'), findsOneWidget);
       expect(find.text('Chapter 3 - Page 8'), findsOneWidget);
       expect(find.text('Demo Source'), findsOneWidget);
@@ -145,8 +143,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('optional lines and progress are hidden when absent',
-        (tester) async {
+    testWidgets('optional lines and progress are hidden when absent', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         harness(const RecentComicCard(data: RecentComicCardData(title: 'T'))),
       );
@@ -205,9 +204,7 @@ void main() {
     });
 
     testWidgets('missing cover shows the placeholder', (tester) async {
-      await tester.pumpWidget(
-        harness(const RecentComicCard(data: _fakeData)),
-      );
+      await tester.pumpWidget(harness(const RecentComicCard(data: _fakeData)));
       expect(find.byIcon(Icons.menu_book_outlined), findsOneWidget);
       expect(find.byType(Image), findsNothing);
     });
@@ -280,17 +277,13 @@ void main() {
 
     testWidgets('action needs both label and callback', (tester) async {
       await tester.pumpWidget(
-        harness(
-          const RecentComicCard(data: _fakeData, actionLabel: 'Resume'),
-        ),
+        harness(const RecentComicCard(data: _fakeData, actionLabel: 'Resume')),
       );
       expect(find.byType(FilledButton), findsNothing);
     });
 
     testWidgets('card without onTap does not crash on tap', (tester) async {
-      await tester.pumpWidget(
-        harness(const RecentComicCard(data: _fakeData)),
-      );
+      await tester.pumpWidget(harness(const RecentComicCard(data: _fakeData)));
       await tester.tap(find.text('Demo Comic'));
       expect(tester.takeException(), isNull);
     });
@@ -320,8 +313,9 @@ void main() {
 
     for (final scale in [1.0, 1.5, 2.0]) {
       for (final width in [320.0, 360.0, 600.0]) {
-        testWidgets('no overflow at ${scale}x text, ${width}dp wide',
-            (tester) async {
+        testWidgets('no overflow at ${scale}x text, ${width}dp wide', (
+          tester,
+        ) async {
           await tester.pumpWidget(
             harness(
               RecentComicCard(
@@ -345,8 +339,7 @@ void main() {
       }
     }
 
-    testWidgets('exposes one labeled button with a tap action',
-        (tester) async {
+    testWidgets('exposes one labeled button with a tap action', (tester) async {
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(
         harness(
@@ -376,9 +369,7 @@ void main() {
 
     testWidgets('is not exposed as tappable without onTap', (tester) async {
       final handle = tester.ensureSemantics();
-      await tester.pumpWidget(
-        harness(const RecentComicCard(data: _fakeData)),
-      );
+      await tester.pumpWidget(harness(const RecentComicCard(data: _fakeData)));
       final node = tester.getSemantics(
         find.bySemanticsLabel(RegExp('Demo Comic')),
       );
@@ -388,8 +379,9 @@ void main() {
     });
 
     for (final brightness in Brightness.values) {
-      testWidgets('meets tap target and label guidelines ($brightness)',
-          (tester) async {
+      testWidgets('meets tap target and label guidelines ($brightness)', (
+        tester,
+      ) async {
         final handle = tester.ensureSemantics();
         await tester.pumpWidget(
           harness(
@@ -407,8 +399,9 @@ void main() {
         handle.dispose();
       });
 
-      testWidgets('meets text contrast guideline ($brightness)',
-          (tester) async {
+      testWidgets('meets text contrast guideline ($brightness)', (
+        tester,
+      ) async {
         final handle = tester.ensureSemantics();
         await tester.pumpWidget(
           harness(
@@ -435,9 +428,7 @@ void main() {
 
   group('CoverImage', () {
     testWidgets('uses the supplied size', (tester) async {
-      await tester.pumpWidget(
-        harness(const CoverImage(width: 50, height: 70)),
-      );
+      await tester.pumpWidget(harness(const CoverImage(width: 50, height: 70)));
       expect(tester.getSize(find.byType(CoverImage)), const Size(50, 70));
     });
   });
@@ -513,8 +504,9 @@ void main() {
 
     for (final scale in [1.0, 2.0]) {
       for (final width in [240.0, 320.0]) {
-        testWidgets('long action label: no overflow at ${scale}x, ${width}dp',
-            (tester) async {
+        testWidgets('long action label: no overflow at ${scale}x, ${width}dp', (
+          tester,
+        ) async {
           var taps = 0;
           await tester.pumpWidget(
             harness(
